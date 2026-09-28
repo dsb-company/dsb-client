@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#071426">
+  <meta name="description" content="Portal de suporte e atendimento da DSB Company.">
+  <title>DSB Client · Portal do Cliente</title>
+  <link rel="icon" href="assets/images/logo.png">
+  <link rel="stylesheet" href="css/styles.css">
+  <script defer src="supabase/config.js"></script>
+  <script defer src="supabase/supabase.js"></script>
+  <script defer src="js/app.js"></script>
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <section id="login-view" class="auth-layout">
+    <div class="auth-brand">
+      <div class="brand-top">
+        <img src="assets/images/logo.png" alt="DSB Company" class="brand-logo">
+        <span class="brand-product">CLIENT</span>
+      </div>
+      <div class="auth-copy">
+        <p class="eyebrow">PORTAL DO CLIENTE</p>
+        <h1>Seu suporte,<br><span>em um só lugar.</span></h1>
+        <p>Abra solicitações, acompanhe cada etapa e converse diretamente com a equipe DSB.</p>
+      </div>
+      <div class="auth-feature-list" aria-label="Recursos do portal">
+        <div><span class="feature-icon" data-icon="ticket"></span><div><strong>Chamados organizados</strong><small>Histórico completo de cada solicitação.</small></div></div>
+        <div><span class="feature-icon" data-icon="chat"></span><div><strong>Contato direto</strong><small>Respostas da equipe dentro do chamado.</small></div></div>
+        <div><span class="feature-icon" data-icon="shield"></span><div><strong>Acesso protegido</strong><small>Você visualiza somente os dados da sua empresa.</small></div></div>
+      </div>
+      <p class="brand-signature">Digital solutions for business.</p>
+    </div>
+
+    <main class="auth-main">
+      <div class="auth-card" id="login-card">
+        <div class="auth-card-head">
+          <span class="mini-badge">DSB CLIENT</span>
+          <h2>Bem-vindo.</h2>
+          <p>Entre com o acesso fornecido pela DSB Company.</p>
+        </div>
+        <form id="login-form" novalidate>
+          <label for="login-email">E-mail</label>
+          <div class="input-shell"><span data-icon="mail"></span><input id="login-email" name="email" type="email" autocomplete="username" placeholder="voce@empresa.com" maxlength="254" required></div>
+          <label for="login-password">Senha</label>
+          <div class="input-shell"><span data-icon="lock"></span><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Sua senha" minlength="6" required><button type="button" class="password-toggle" id="password-toggle" aria-label="Mostrar senha" data-icon-button="eye"></button></div>
+          <div class="form-between"><label class="check"><input id="remember" type="checkbox" checked><span>Manter conectado</span></label><button type="button" class="text-action" id="forgot-password">Esqueci minha senha</button></div>
+          <p class="form-error" id="login-error" role="alert"></p>
+          <button class="btn btn-primary btn-wide" type="submit" id="login-submit"><span>Entrar no portal</span><span data-icon="arrow-right"></span></button>
+        </form>
+        <div class="auth-help">Ainda não possui acesso? <strong>Solicite à equipe DSB.</strong></div>
+      </div>
+
+      <div class="auth-card" id="recovery-card" hidden>
+        <div class="auth-card-head">
+          <span class="mini-badge">RECUPERAÇÃO</span>
+          <h2>Criar nova senha.</h2>
+          <p>Escolha uma senha com pelo menos 8 caracteres.</p>
+        </div>
+        <form id="recovery-form">
+          <label for="new-password">Nova senha</label>
+          <div class="input-shell"><span data-icon="lock"></span><input id="new-password" name="password" type="password" minlength="8" autocomplete="new-password" required placeholder="Mínimo de 8 caracteres"></div>
+          <label for="confirm-password">Confirmar senha</label>
+          <div class="input-shell"><span data-icon="lock"></span><input id="confirm-password" name="confirm" type="password" minlength="8" autocomplete="new-password" required placeholder="Repita a nova senha"></div>
+          <p class="form-error" id="recovery-error" role="alert"></p>
+          <button class="btn btn-primary btn-wide" type="submit">Salvar nova senha</button>
+        </form>
+      </div>
+    </main>
+  </section>
+
+  <section id="unauthorized-view" class="center-state" hidden>
+    <div class="state-card">
+      <span class="state-icon" data-icon="shield"></span>
+      <p class="eyebrow">ACESSO NÃO VINCULADO</p>
+      <h1>Seu login ainda não está associado a uma empresa.</h1>
+      <p>Peça à equipe DSB para liberar seu acesso ao Portal do Cliente.</p>
+      <button class="btn btn-secondary" data-action="logout">Sair da conta</button>
+    </div>
+  </section>
+
+  <div id="app-view" class="app" hidden>
+    <button id="sidebar-overlay" class="sidebar-overlay" aria-label="Fechar menu"></button>
+    <aside class="sidebar" id="sidebar">
+      <a class="sidebar-brand" href="#dashboard" aria-label="DSB Client, início">
+        <img src="assets/images/logo.png" alt="DSB Company">
+        <span>CLIENT</span>
+      </a>
+      <div class="company-chip">
+        <span class="company-avatar" id="company-avatar">D</span>
+        <div><small>EMPRESA</small><strong id="sidebar-company">Cliente DSB</strong></div>
+      </div>
+      <p class="nav-label">PORTAL</p>
+      <nav class="nav" id="main-nav">
+        <a href="#dashboard" data-route="dashboard"><span data-icon="home"></span><span>Visão geral</span></a>
+        <a href="#tickets" data-route="tickets"><span data-icon="ticket"></span><span>Meus chamados</span><b id="ticket-badge" hidden>0</b></a>
+        <a href="#new-ticket" data-route="new-ticket"><span data-icon="plus-circle"></span><span>Novo chamado</span></a>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <p class="nav-label">CONTA</p>
+      <nav class="nav">
+        <a href="#account" data-route="account"><span data-icon="user"></span><span>Minha conta</span></a>
+      </nav>
+      <div class="support-note"><span data-icon="spark"></span><div><strong>Precisa de ajuda?</strong><p>Abra um chamado e nossa equipe acompanha por aqui.</p></div></div>
+      <button class="sidebar-user" id="sidebar-user" type="button" data-action="account">
+        <span class="avatar" id="user-avatar">C</span><span><strong id="sidebar-user-name">Cliente</strong><small id="sidebar-user-email">—</small></span><span data-icon="chevron-right"></span>
+      </button>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <div class="topbar-left"><button class="icon-btn mobile-menu" id="mobile-menu" aria-label="Abrir menu"><span data-icon="menu"></span></button><div><small id="page-kicker">PORTAL DSB</small><h1 id="page-title">Visão geral</h1></div></div>
+        <div class="topbar-actions"><button class="icon-btn" id="refresh-button" aria-label="Atualizar"><span data-icon="refresh"></span></button><button class="top-user" type="button" data-action="account"><span class="avatar small" id="top-avatar">C</span><span class="desktop-only"><strong id="top-user-name">Cliente</strong><small id="top-company">DSB Company</small></span><span data-icon="chevron-down"></span></button></div>
+      </header>
+      <main id="content" class="content" tabindex="-1"></main>
+      <footer class="footer"><span>DSB Client <i>·</i> Portal do Cliente</span><span id="sync-label">Conectado com segurança</span></footer>
+    </div>
+  </div>
+
+  <dialog id="modal"><div id="modal-content"></div></dialog>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <noscript>Ative o JavaScript para acessar o DSB Client.</noscript>
+</body>
+</html>
