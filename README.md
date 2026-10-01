@@ -98,3 +98,7 @@ Durante testes locais, adicione também o endereço usado pelo Live Server.
 Cliente abre ou responde no DSB Client → dados são salvos nas mesmas tabelas `dsb_tickets`, `dsb_ticket_messages` e `dsb_ticket_attachments` → aparecem no DSB Manager.
 
 Resposta da equipe no DSB Manager → aparece no mesmo chamado do DSB Client.
+
+
+## Correção de senha (30/09/2026)
+O formulário Minha conta > Atualizar senha agora valida a sessão, aguarda a confirmação do Supabase e encerra a sessão após a troca. Se a operação funcionar, o usuário volta ao login e deve entrar com a nova senha.

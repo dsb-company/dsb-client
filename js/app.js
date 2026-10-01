@@ -42,7 +42,7 @@ const ICONS = {
 
 const state = {
   client:null, user:null, profile:null, tickets:[], messages:[], attachments:[],
-  loading:false, loaded:false, recovery:false, filter:'Todos', search:'', selectedId:null,
+  loading:false, loaded:false, recovery:false, authEntryType:null, filter:'Todos', search:'', selectedId:null,
   poll:null
 };
 
@@ -62,6 +62,10 @@ function friendly(error){
   if(/rate limit|too many requests/i.test(msg)) return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
   if(/user without|empresa autorizada|sem empresa/i.test(msg)) return 'Este acesso ainda não está vinculado a uma empresa.';
   if(/failed to fetch|network/i.test(msg)) return 'Não foi possível conectar. Verifique sua internet e tente novamente.';
+  if(/session.*missing|auth session missing|session.*expired|jwt.*expired/i.test(msg)) return 'Sua sessão expirou. Entre novamente e tente alterar a senha.';
+  if(/password.*same|same password|different from the old/i.test(msg)) return 'Escolha uma senha diferente da anterior.';
+  if(/password.*short|at least|minimum.*password|weak password/i.test(msg)) return 'A senha não atende aos requisitos de segurança do Supabase.';
+  if(/reauth|nonce|recently signed/i.test(msg)) return 'O Supabase exige uma nova autenticação antes de trocar a senha. Saia, entre novamente e tente de novo.';
   if(/portal_profile|function .* does not exist|PGRST202/i.test(msg)) return 'O Portal DSB ainda precisa ser ativado no banco. Execute supabase/portal-setup.sql.';
   return msg.length>180 ? 'Não foi possível concluir a operação.' : msg;
 }
@@ -85,6 +89,12 @@ function safeUrl(value){try{const u=new URL(value);return ['http:','https:'].inc
 function safeFileName(name){return String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,120)||'arquivo';}
 function validateFiles(files){for(const file of files){if(file.size>MAX_FILE_SIZE)throw Error(`${file.name}: limite de 10 MB.`);if(!ALLOWED_MIME.has(file.type))throw Error(`${file.name}: formato não permitido.`);}}
 
+function authCallbackType(){
+  const hashParams=new URLSearchParams((location.hash||'').replace(/^#/,''));
+  const queryParams=new URLSearchParams(location.search||'');
+  return hashParams.get('type')||queryParams.get('type')||null;
+}
+
 function createClient(remember=true){
   const c=window.DSB_CLIENT_CONFIG||{};
   const storage=remember?localStorage:sessionStorage;
@@ -94,7 +104,7 @@ function createClient(remember=true){
 }
 function bindAuthListener(client){
   client.auth.onAuthStateChange(async(event,session)=>{
-    if(event==='PASSWORD_RECOVERY'){
+    if(event==='PASSWORD_RECOVERY' || (event==='SIGNED_IN' && state.recovery)){
       state.recovery=true; state.user=session?.user||null; showRecovery(); return;
     }
     if(event==='SIGNED_OUT'){
@@ -211,7 +221,7 @@ function newTicketPage(){
   <form id="new-ticket-form" class="panel form-card" novalidate><div class="form-section"><div class="form-grid"><div class="field span-2"><label for="subject">ASSUNTO</label><input id="subject" name="subject" maxlength="180" minlength="3" required placeholder="Ex.: Botão de agendamento não abre no celular"></div><div class="field"><label for="category">CATEGORIA</label><select id="category" name="category">${CATEGORIES.map(c=>`<option>${E(c)}</option>`).join('')}</select></div><div class="field"><label for="priority">PRIORIDADE</label><select id="priority" name="priority"><option>Baixa</option><option selected>Normal</option><option>Alta</option></select></div><div class="field span-2"><label for="page_url">PÁGINA RELACIONADA <span style="font-weight:400;color:#58738d">(opcional)</span></label><input id="page_url" name="page_url" type="url" maxlength="1000" placeholder="https://seusite.com.br/pagina"><span class="hint">Se o problema estiver em uma página específica, cole o endereço aqui.</span></div><div class="field span-2"><label for="description">DESCRIÇÃO</label><textarea id="description" name="description" minlength="3" maxlength="5000" required placeholder="Conte o que aconteceu, o que você esperava que acontecesse e, se possível, em qual dispositivo ocorreu..."></textarea></div><div class="field span-2"><label for="initial-files">ANEXOS <span style="font-weight:400;color:#58738d">(opcional)</span></label><label class="file-label" for="initial-files"><span data-icon="paperclip"></span>Selecionar imagens ou arquivos<input id="initial-files" type="file" multiple accept="image/png,image/jpeg,image/webp,application/pdf,text/plain"></label><span id="initial-files-label" class="hint">PNG, JPG, WEBP, PDF ou TXT · até 10 MB por arquivo.</span></div><div class="field span-2"><label>COMO ESCOLHER A PRIORIDADE</label><div class="priority-help"><div class="priority-option"><strong>Baixa</strong><small>Ajuste ou dúvida sem impacto imediato.</small></div><div class="priority-option"><strong>Normal</strong><small>Problema que precisa ser analisado.</small></div><div class="priority-option"><strong>Alta</strong><small>Falha importante que afeta o uso do serviço.</small></div></div></div></div><p class="form-error" id="new-ticket-error" role="alert" style="margin-top:16px"></p></div><div class="form-footer"><a class="btn btn-ghost" href="#tickets">Cancelar</a><button class="btn btn-primary" id="create-ticket-button" type="submit"><span data-icon="send"></span>Enviar chamado</button></div></form>`;
 }
 function accountPage(){
-  const p=state.profile||{};return `<section class="page-heading"><div><p class="eyebrow">SEU ACESSO</p><h2>Minha conta</h2><p>Confira os dados vinculados ao Portal DSB e gerencie sua senha.</p></div></section><section class="account-grid"><article class="panel profile-card"><div class="profile-head"><span class="avatar">${E(initials(p.name))}</span><div><h3>${E(p.name||'Cliente')}</h3><p>${E(p.company_name||'Cliente DSB')}</p></div></div><div class="profile-data"><div><small>E-mail de acesso</small><strong>${E(p.email||state.user?.email||'—')}</strong></div><div><small>Empresa</small><strong>${E(p.company_name||'—')}</strong></div><div><small>Status do cliente</small><strong>${E(p.company_status||'—')}</strong></div><div><small>Ambiente</small><strong>Portal DSB Client</strong></div></div></article><article class="panel security-card"><h3>Segurança</h3><p>Altere sua senha de acesso. A nova senha deve ter pelo menos 8 caracteres.</p><form id="change-password-form"><div class="field"><label for="account-password">NOVA SENHA</label><input id="account-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="account-confirm">CONFIRMAR SENHA</label><input id="account-confirm" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div><p class="form-error" id="account-password-error"></p><button class="btn btn-primary" type="submit">Atualizar senha</button><button class="btn btn-danger" type="button" data-action="logout" style="margin-left:6px"><span data-icon="logout"></span>Sair</button></form></article></section>`;
+  const p=state.profile||{};return `<section class="page-heading"><div><p class="eyebrow">SEU ACESSO</p><h2>Minha conta</h2><p>Confira os dados vinculados ao Portal DSB e gerencie sua senha.</p></div></section><section class="account-grid"><article class="panel profile-card"><div class="profile-head"><span class="avatar">${E(initials(p.name))}</span><div><h3>${E(p.name||'Cliente')}</h3><p>${E(p.company_name||'Cliente DSB')}</p></div></div><div class="profile-data"><div><small>E-mail de acesso</small><strong>${E(p.email||state.user?.email||'—')}</strong></div><div><small>Empresa</small><strong>${E(p.company_name||'—')}</strong></div><div><small>Status do cliente</small><strong>${E(p.company_status||'—')}</strong></div><div><small>Ambiente</small><strong>Portal DSB Client</strong></div></div></article><article class="panel security-card"><h3>Segurança</h3><p>Altere sua senha de acesso. A nova senha deve ter pelo menos 8 caracteres.</p><form id="change-password-form" novalidate><div class="field"><label for="account-password">NOVA SENHA</label><input id="account-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="account-confirm">CONFIRMAR SENHA</label><input id="account-confirm" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div><p class="form-error" id="account-password-error"></p><button class="btn btn-primary" type="submit">Atualizar senha</button><button class="btn btn-danger" type="button" data-action="logout" style="margin-left:6px"><span data-icon="logout"></span>Sair</button></form></article></section>`;
 }
 function ticketDetailPage(ticket){
   const messages=state.messages||[],byMessage=new Map();state.attachments.forEach(a=>{if(!byMessage.has(a.message_id))byMessage.set(a.message_id,[]);byMessage.get(a.message_id).push(a);});
@@ -272,9 +282,41 @@ async function recoverPassword(event){
   event.preventDefault();const form=event.currentTarget,errorEl=$('#recovery-error'),button=form.querySelector('button[type="submit"]');errorEl.textContent='';const a=$('#new-password').value,b=$('#confirm-password').value;if(a.length<8){errorEl.textContent='Use pelo menos 8 caracteres.';return;}if(a!==b){errorEl.textContent='As senhas não coincidem.';return;}setBusy(button,true,'Salvando...');
   try{const {error}=await state.client.auth.updateUser({password:a});if(error)throw error;toast('Senha alterada. Entre novamente com a nova senha.');await state.client.auth.signOut();state.recovery=false;history.replaceState(null,'',location.pathname);showLogin();}catch(error){errorEl.textContent=friendly(error);}finally{setBusy(button,false);}
 }
-async function changePassword(event){
-  event.preventDefault();const form=event.currentTarget,errorEl=$('#account-password-error'),button=form.querySelector('button[type="submit"]');const a=String(new FormData(form).get('password')||''),b=String(new FormData(form).get('confirm')||'');errorEl.textContent='';if(a.length<8){errorEl.textContent='Use pelo menos 8 caracteres.';return;}if(a!==b){errorEl.textContent='As senhas não coincidem.';return;}setBusy(button,true,'Atualizando...');
-  try{const {error}=await state.client.auth.updateUser({password:a});if(error)throw error;form.reset();toast('Senha atualizada com sucesso.');}catch(error){errorEl.textContent=friendly(error);}finally{setBusy(button,false);}
+async function changePassword(form){
+  const errorEl=$('#account-password-error'),button=form.querySelector('button[type="submit"]');
+  const values=new FormData(form);
+  const a=String(values.get('password')||''),b=String(values.get('confirm')||'');
+  if(errorEl)errorEl.textContent='';
+  if(a.length<8){if(errorEl)errorEl.textContent='Use pelo menos 8 caracteres.';return;}
+  if(a!==b){if(errorEl)errorEl.textContent='As senhas não coincidem.';return;}
+  setBusy(button,true,'Atualizando...');
+  try{
+    if(!state.client)throw Error('Cliente de autenticação indisponível. Atualize a página e tente novamente.');
+    const {data:sessionData,error:sessionError}=await state.client.auth.getSession();
+    if(sessionError)throw sessionError;
+    if(!sessionData?.session)throw Error('Sua sessão expirou. Entre novamente antes de alterar a senha.');
+
+    const email=state.user?.email||sessionData.session.user?.email||'';
+    const {data:updateData,error:updateError}=await state.client.auth.updateUser({password:a});
+    if(updateError)throw updateError;
+    if(!updateData?.user)throw Error('O Supabase não confirmou a alteração da senha.');
+
+    // Força a sessão a refletir a alteração antes de encerrá-la.
+    const {error:refreshError}=await state.client.auth.refreshSession();
+    if(refreshError)throw refreshError;
+
+    form.reset();
+    await state.client.auth.signOut();
+    state.user=null;state.profile=null;state.tickets=[];state.recovery=false;
+    history.replaceState(null,'',location.pathname);
+    showLogin();
+    if(email)$('#login-email').value=email;
+    toast('Senha salva com sucesso. Entre novamente com a nova senha.');
+  }catch(error){
+    console.error('Falha ao atualizar senha:',error);
+    if(errorEl)errorEl.textContent=friendly(error);
+    toast(friendly(error),'error');
+  }finally{setBusy(button,false);}
 }
 async function logout(){try{await state.client?.auth.signOut();}catch{}showLogin();}
 async function refresh(){
@@ -304,17 +346,27 @@ function bindEvents(){
     if(event.target.id==='reply-form'){
       event.preventDefault();const button=$('#reply-button'),errorEl=$('#reply-error');errorEl.textContent='';setBusy(button,true,'Enviando...');try{await sendReply(event.target);event.target.reset();await renderCurrent();toast('Resposta enviada.');setTimeout(()=>{$('#message-list')?.scrollTo({top:999999,behavior:'smooth'});},50);}catch(error){errorEl.textContent=friendly(error);}finally{setBusy(button,false);}return;
     }
-    if(event.target.id==='change-password-form')changePassword(event);
+    if(event.target.id==='change-password-form'){
+      event.preventDefault();
+      await changePassword(event.target);
+      return;
+    }
   });
 }
 function updateFileLabel(inputId,labelId){const files=[...($(`#${inputId}`)?.files||[])];const label=$(`#${labelId}`);if(!label)return;label.textContent=files.length?`${files.length} arquivo(s): ${files.map(f=>f.name).join(', ')}`:(inputId==='initial-files'?'PNG, JPG, WEBP, PDF ou TXT · até 10 MB por arquivo.':'');}
 
 async function init(){
   injectIcons();bindEvents();const config=window.DSB_CLIENT_CONFIG||{};if(!window.supabase||!validConfig(config)){$('#login-error').textContent='O Portal DSB ainda não foi configurado. Contate a equipe responsável.';return;}
+  state.authEntryType=authCallbackType();
+  if(state.authEntryType==='invite'||state.authEntryType==='recovery') state.recovery=true;
   const remember=localStorage.getItem('dsb.client.remember')!=='false';$('#remember').checked=remember;const client=createClient(remember);
   try{
     const {data,error}=await client.auth.getSession();if(error)throw error;
-    if(data.session){state.user=data.session.user;if(state.recovery)return;const profile=await loadProfile();if(!profile){showUnauthorized();return;}await loadTickets();showApp();}else showLogin();
+    if(data.session){
+      state.user=data.session.user;
+      if(state.recovery){showRecovery();return;}
+      const profile=await loadProfile();if(!profile){showUnauthorized();return;}await loadTickets();showApp();
+    }else showLogin();
   }catch(error){$('#login-error').textContent=friendly(error);showLogin();}
 }
 
