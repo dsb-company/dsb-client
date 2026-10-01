@@ -1,0 +1,6 @@
+const CACHE_NAME='dsb-client-v2';
+const STATIC=['./','./index.html','./css/styles.css','./js/app.js','./assets/images/logo.png'];
+self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE_NAME).then(c=>c.addAll(STATIC)));self.skipWaiting();});
+self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE_NAME).map(k=>caches.delete(k)))));self.clients.claim();});
+self.addEventListener('fetch',event=>{const r=event.request,u=new URL(r.url);if(r.method!=='GET'||u.hostname.includes('supabase.co'))return;event.respondWith(fetch(r).then(res=>{const copy=res.clone();caches.open(CACHE_NAME).then(c=>c.put(r,copy));return res;}).catch(()=>caches.match(r)));});
+self.addEventListener('notificationclick',event=>{event.notification.close();const target=event.notification?.data?.url||'./#tickets';event.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(list=>{for(const c of list){if('focus'in c){c.navigate(target);return c.focus();}}if(clients.openWindow)return clients.openWindow(target);}));});

@@ -102,3 +102,23 @@ Resposta da equipe no DSB Manager → aparece no mesmo chamado do DSB Client.
 
 ## Correção de senha (30/09/2026)
 O formulário Minha conta > Atualizar senha agora valida a sessão, aguarda a confirmação do Supabase e encerra a sessão após a troca. Se a operação funcionar, o usuário volta ao login e deve entrar com a nova senha.
+
+## Realtime, notificações e foto de perfil
+
+Execute **uma vez** no mesmo projeto Supabase usado pelo Manager:
+
+`supabase/realtime-perfis.sql`
+
+> Se você já executou o arquivo que veio no DSB Manager, não execute novamente; é o mesmo upgrade de banco.
+
+Com esse upgrade, o DSB Client passa a ter:
+- mensagens e alterações do chamado em tempo real;
+- rolagem automática para a mensagem mais recente;
+- indicador **Nova mensagem** e contador de não lidas;
+- marcação de leitura ao abrir o chamado;
+- data/hora das mensagens atualizada sem recarregar;
+- som opcional quando a DSB responde e o chamado não está aberto;
+- notificações do Windows/navegador, ativadas pelo próprio usuário;
+- foto de perfil com recorte, arraste e zoom em **Minha conta**.
+
+As notificações desta versão dependem do DSB Client estar aberto ou em execução em segundo plano no navegador/PWA. Push com o portal totalmente fechado pode ser implementado depois com Web Push.

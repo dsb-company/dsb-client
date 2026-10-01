@@ -123,5 +123,10 @@
   <dialog id="modal"><div id="modal-content"></div></dialog>
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <noscript>Ative o JavaScript para acessar o DSB Client.</noscript>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+    }
+  </script>
 </body>
 </html>

@@ -9,6 +9,9 @@ const PRIORITIES = ['Baixa','Normal','Alta'];
 const OPEN_STATUSES = ['Novo','Aberto','Em atendimento','Aguardando cliente'];
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ALLOWED_MIME = new Set(['image/png','image/jpeg','image/webp','application/pdf','text/plain']);
+const AVATAR_BUCKET='dsb-avatars';
+const NOTIFY_KEY='dsb.client.tickets.windowsNotifications';
+const SOUND_KEY='dsb.client.tickets.sound';
 
 const ICONS = {
   home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 10.7 12 3.8l8.5 6.9v9.1a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z"/><path d="M9 21.5v-7h6v7"/></svg>',
@@ -43,7 +46,7 @@ const ICONS = {
 const state = {
   client:null, user:null, profile:null, tickets:[], messages:[], attachments:[],
   loading:false, loaded:false, recovery:false, authEntryType:null, filter:'Todos', search:'', selectedId:null,
-  poll:null
+  poll:null,realtime:null,unread:new Map(),ticketProfiles:new Map(),avatarUrls:new Map(),crop:null
 };
 
 function injectIcons(base=document){
@@ -88,6 +91,30 @@ function ticketCode(n){return `DSB-${String(n||0).padStart(5,'0')}`;}
 function safeUrl(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)?u.href:'';}catch{return '';}}
 function safeFileName(name){return String(name).normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,120)||'arquivo';}
 function validateFiles(files){for(const file of files){if(file.size>MAX_FILE_SIZE)throw Error(`${file.name}: limite de 10 MB.`);if(!ALLOWED_MIME.has(file.type))throw Error(`${file.name}: formato não permitido.`);}}
+function totalUnread(){return [...state.unread.values()].reduce((sum,n)=>sum+Number(n||0),0);}
+function unreadCount(ticketId){return Number(state.unread.get(ticketId)||0);}
+function notificationsEnabled(){return localStorage.getItem(NOTIFY_KEY)==='true'&&'Notification'in window&&Notification.permission==='granted';}
+function soundEnabled(){return localStorage.getItem(SOUND_KEY)!=='false';}
+async function signAvatar(path){if(!path)return'';if(state.avatarUrls.has(path))return state.avatarUrls.get(path);const {data,error}=await state.client.storage.from(AVATAR_BUCKET).createSignedUrl(path,43200);if(error||!data?.signedUrl)return'';state.avatarUrls.set(path,data.signedUrl);return data.signedUrl;}
+function avatarHtml(userId,name,className='avatar'){const profile=state.ticketProfiles.get(userId);const path=profile?.avatar_path||(userId===state.user?.id?state.profile?.avatar_path:'');const url=path?state.avatarUrls.get(path):'';return `<span class="${E(className)}${url?' has-photo':''}">${url?`<img src="${E(url)}" alt="">`:E(initials(name))}</span>`;}
+async function refreshOwnAvatar(){const path=state.profile?.avatar_path;if(path)await signAvatar(path);hydrateProfileUI();}
+async function loadTicketProfiles(ticketId){state.ticketProfiles.clear();const {data,error}=await state.client.rpc('dsb_ticket_profiles',{p_ticket_id:ticketId});if(error)return;await Promise.all((data||[]).map(async p=>{if(p.avatar_path)await signAvatar(p.avatar_path);state.ticketProfiles.set(p.user_id,p);}));}
+async function loadUnread(){try{const {data,error}=await state.client.rpc('dsb_ticket_unread_summary');if(error)throw error;state.unread=new Map((data||[]).map(r=>[r.ticket_id,Number(r.unread_count)||0]));}catch(error){if(!/dsb_ticket_unread_summary|PGRST202|does not exist|schema cache/i.test(String(error?.message||error)))throw error;state.unread=new Map();}}
+async function markRead(ticketId){if(!ticketId)return;try{const {error}=await state.client.rpc('dsb_mark_ticket_read',{p_ticket_id:ticketId});if(error)throw error;state.unread.set(ticketId,0);updateBadge();updateUnreadIndicators();}catch{}}
+function playMessageSound(){if(!soundEnabled())return;try{const AudioCtx=window.AudioContext||window.webkitAudioContext;const ac=new AudioCtx(),o=ac.createOscillator(),g=ac.createGain();o.type='sine';o.frequency.value=600;g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.04,ac.currentTime+.015);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.18);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.2);o.onended=()=>ac.close();}catch{}}
+async function showWindowsNotification(ticket,message){if(!notificationsEnabled())return;const options={body:`${message.author_name}: ${String(message.body||'Nova mensagem').slice(0,120)}`,icon:'assets/images/logo.png',tag:`dsb-client-ticket-${ticket.id}`,renotify:true,data:{url:`${location.origin}${location.pathname}#ticket/${ticket.id}`}};try{if('serviceWorker'in navigator){const reg=await navigator.serviceWorker.ready;await reg.showNotification(`${ticketCode(ticket.ticket_number)} · DSB`,options);}else new Notification(`${ticketCode(ticket.ticket_number)} · DSB`,options);}catch{}}
+async function toggleNotifications(){if(!('Notification'in window)){toast('Este navegador não oferece notificações do sistema.','error');return;}if(notificationsEnabled()){localStorage.setItem(NOTIFY_KEY,'false');await renderCurrent();return;}if(Notification.permission==='denied'){toast('As notificações estão bloqueadas. Libere a permissão nas configurações do navegador.','error');return;}const permission=await Notification.requestPermission();localStorage.setItem(NOTIFY_KEY,permission==='granted'?'true':'false');toast(permission==='granted'?'Notificações ativadas neste dispositivo.':'Permissão de notificações não concedida.',permission==='granted'?'success':'error');await renderCurrent();}
+function notificationStatus(){if(!('Notification'in window))return'Não suportado';if(Notification.permission==='denied')return'Bloqueado no navegador';if(notificationsEnabled())return'Ativadas neste dispositivo';if(Notification.permission==='granted')return'Desativadas neste dispositivo';return'Aguardando permissão';}
+function showAvatarModal(){const modal=$('#modal'),body=$('#modal-content');body.innerHTML=`<div class="client-modal-head"><h3>Foto de perfil</h3><button class="icon-btn" type="button" data-avatar-action="close">×</button></div><div class="client-modal-body"><div class="avatar-crop-layout"><div class="avatar-crop-stage"><canvas id="avatar-crop-canvas" width="512" height="512"></canvas><p id="avatar-crop-empty">Escolha uma imagem para começar.</p></div><div class="avatar-crop-controls"><label class="btn btn-secondary avatar-file-button">Escolher foto<input id="avatar-file-input" type="file" accept="image/png,image/jpeg,image/webp"></label><label for="avatar-zoom">Zoom</label><input id="avatar-zoom" type="range" min="1" max="3" step=".01" value="1" disabled><p>Arraste a imagem para ajustar o enquadramento.</p><p class="form-error" id="avatar-error"></p></div></div><div class="client-modal-actions"><button class="btn btn-ghost" type="button" data-avatar-action="close">Cancelar</button><button class="btn btn-primary" type="button" data-avatar-action="save" disabled>Salvar foto</button></div></div>`;state.crop={img:null,zoom:1,offsetX:0,offsetY:0,drag:false,startX:0,startY:0,originX:0,originY:0};modal.showModal();bindCropCanvas();}
+function closeAvatarModal(){if($('#modal')?.open)$('#modal').close();state.crop=null;}
+function cropGeometry(){const canvas=$('#avatar-crop-canvas'),crop=state.crop;if(!canvas||!crop?.img)return null;const s=canvas.width,base=Math.max(s/crop.img.width,s/crop.img.height),scale=base*crop.zoom,w=crop.img.width*scale,h=crop.img.height*scale;return{s,w,h,x:(s-w)/2+crop.offsetX,y:(s-h)/2+crop.offsetY};}
+function clampCrop(){const g=cropGeometry(),crop=state.crop;if(!g||!crop)return;crop.offsetX=Math.max(-(g.w-g.s)/2,Math.min((g.w-g.s)/2,crop.offsetX));crop.offsetY=Math.max(-(g.h-g.s)/2,Math.min((g.h-g.s)/2,crop.offsetY));}
+function drawCrop(){const canvas=$('#avatar-crop-canvas'),g=cropGeometry();if(!canvas||!g)return;const c=canvas.getContext('2d');c.clearRect(0,0,canvas.width,canvas.height);c.drawImage(state.crop.img,g.x,g.y,g.w,g.h);}
+function bindCropCanvas(){const canvas=$('#avatar-crop-canvas');if(!canvas)return;canvas.addEventListener('pointerdown',e=>{if(!state.crop?.img)return;const r=canvas.getBoundingClientRect(),sx=canvas.width/r.width,sy=canvas.height/r.height;state.crop.drag=true;canvas.setPointerCapture(e.pointerId);state.crop.startX=(e.clientX-r.left)*sx;state.crop.startY=(e.clientY-r.top)*sy;state.crop.originX=state.crop.offsetX;state.crop.originY=state.crop.offsetY;});canvas.addEventListener('pointermove',e=>{if(!state.crop?.drag)return;const r=canvas.getBoundingClientRect(),sx=canvas.width/r.width,sy=canvas.height/r.height,x=(e.clientX-r.left)*sx,y=(e.clientY-r.top)*sy;state.crop.offsetX=state.crop.originX+x-state.crop.startX;state.crop.offsetY=state.crop.originY+y-state.crop.startY;clampCrop();drawCrop();});const end=()=>{if(state.crop)state.crop.drag=false;};canvas.addEventListener('pointerup',end);canvas.addEventListener('pointercancel',end);}
+async function loadCropFile(file){if(!file)return;if(!['image/png','image/jpeg','image/webp'].includes(file.type))throw Error('Use PNG, JPG ou WEBP.');if(file.size>5*1024*1024)throw Error('A imagem deve ter no máximo 5 MB.');const url=URL.createObjectURL(file),img=new Image();await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(Error('Não foi possível ler a imagem.'));img.src=url;});URL.revokeObjectURL(url);state.crop.img=img;state.crop.zoom=1;state.crop.offsetX=0;state.crop.offsetY=0;$('#avatar-zoom').disabled=false;$('[data-avatar-action="save"]').disabled=false;$('#avatar-crop-empty').hidden=true;drawCrop();}
+function avatarBlob(){return new Promise((resolve,reject)=>$('#avatar-crop-canvas').toBlob(b=>b?resolve(b):reject(Error('Não foi possível preparar a foto.')),'image/webp',.9));}
+async function saveAvatar(){const uid=state.user?.id;if(!uid||!state.crop?.img)throw Error('Escolha uma foto.');const blob=await avatarBlob(),old=state.profile?.avatar_path||'',path=`${uid}/avatar-${Date.now()}.webp`;const {error:up}=await state.client.storage.from(AVATAR_BUCKET).upload(path,blob,{contentType:'image/webp'});if(up)throw up;const {error}=await state.client.rpc('dsb_set_my_avatar',{p_avatar_path:path});if(error){await state.client.storage.from(AVATAR_BUCKET).remove([path]);throw error;}if(old)await state.client.storage.from(AVATAR_BUCKET).remove([old]).catch(()=>{});state.avatarUrls.delete(old);state.profile.avatar_path=path;await signAvatar(path);closeAvatarModal();hydrateProfileUI();await renderCurrent();toast('Foto de perfil atualizada.');}
+async function removeAvatar(){const old=state.profile?.avatar_path||'';const {error}=await state.client.rpc('dsb_set_my_avatar',{p_avatar_path:null});if(error)throw error;if(old)await state.client.storage.from(AVATAR_BUCKET).remove([old]).catch(()=>{});state.avatarUrls.delete(old);state.profile.avatar_path=null;hydrateProfileUI();await renderCurrent();toast('Foto removida.');}
 
 function authCallbackType(){
   const hashParams=new URLSearchParams((location.hash||'').replace(/^#/,''));
@@ -108,7 +135,7 @@ function bindAuthListener(client){
       state.recovery=true; state.user=session?.user||null; showRecovery(); return;
     }
     if(event==='SIGNED_OUT'){
-      stopPolling(); state.user=null;state.profile=null;state.tickets=[]; showLogin();
+      stopPolling();stopRealtime(); state.user=null;state.profile=null;state.tickets=[];state.unread.clear(); showLogin();
     }
   });
 }
@@ -124,23 +151,24 @@ function showUnauthorized(){
 }
 function showApp(){
   $('#login-view').hidden=true;$('#unauthorized-view').hidden=true;$('#app-view').hidden=false;
-  hydrateProfileUI(); startPolling(); handleRoute();
+  hydrateProfileUI(); startRealtime(); startPolling(); handleRoute();
 }
 function hydrateProfileUI(){
   const p=state.profile||{}; const person=p.name||state.user?.email||'Cliente'; const company=p.company_name||'Cliente DSB';
   $('#sidebar-company').textContent=company;$('#top-company').textContent=company;$('#sidebar-user-name').textContent=person;$('#top-user-name').textContent=person;$('#sidebar-user-email').textContent=p.email||state.user?.email||'—';
-  const ci=initials(company),pi=initials(person);$('#company-avatar').textContent=ci;$('#user-avatar').textContent=pi;$('#top-avatar').textContent=pi;
+  $('#company-avatar').textContent=initials(company);
+  const url=p.avatar_path?state.avatarUrls.get(p.avatar_path):'';['#user-avatar','#top-avatar'].forEach(sel=>{const el=$(sel);if(!el)return;el.classList.toggle('has-photo',!!url);el.innerHTML=url?`<img src="${E(url)}" alt="">`:E(initials(person));});
 }
 
 async function loadProfile(){
   const {data,error}=await state.client.rpc('dsb_customer_portal_profile');
-  if(error)throw error; state.profile=Array.isArray(data)?data[0]:data;
+  if(error)throw error; state.profile=Array.isArray(data)?data[0]:data;if(state.profile?.avatar_path)await signAvatar(state.profile.avatar_path);
   return state.profile;
 }
 async function loadTickets({silent=false}={}){
   if(!state.client||!state.user)return;
   if(!silent){state.loading=true;updateSync('Atualizando...');}
-  const {data,error}=await state.client.from('dsb_tickets').select('*').order('last_activity_at',{ascending:false});
+  const [{data,error}]=await Promise.all([state.client.from('dsb_tickets').select('*').order('last_activity_at',{ascending:false}),loadUnread().catch(()=>{})]);
   if(error)throw error; state.tickets=data||[];state.loaded=true;state.loading=false; updateBadge();updateSync('Atualizado agora');
 }
 async function loadTicketDetails(ticketId){
@@ -149,11 +177,11 @@ async function loadTicketDetails(ticketId){
     state.client.from('dsb_ticket_attachments').select('*').eq('ticket_id',ticketId).order('created_at',{ascending:true})
   ]);
   if(messagesRes.error)throw messagesRes.error;if(attachmentsRes.error)throw attachmentsRes.error;
-  state.messages=messagesRes.data||[];state.attachments=attachmentsRes.data||[];
+  state.messages=messagesRes.data||[];state.attachments=attachmentsRes.data||[];await loadTicketProfiles(ticketId);
 }
 function updateSync(text){const el=$('#sync-label');if(el)el.textContent=text;}
 function updateBadge(){
-  const count=state.tickets.filter(t=>OPEN_STATUSES.includes(t.status)).length;const badge=$('#ticket-badge');if(!badge)return;badge.textContent=count;badge.hidden=count===0;
+  const count=totalUnread();const badge=$('#ticket-badge');if(!badge)return;badge.textContent=count;badge.hidden=count===0;
 }
 function startPolling(){
   stopPolling();state.poll=setInterval(async()=>{try{await loadTickets({silent:true});const route=currentRoute().name;if(['dashboard','tickets'].includes(route))renderCurrent();}catch{}},60000);
@@ -185,7 +213,7 @@ async function renderCurrent(){
       const ticket=state.tickets.find(t=>t.id===route.id);setPage('SUPORTE',ticket?ticketCode(ticket.ticket_number):'Chamado');
       if(!ticket){content.innerHTML=errorPanel('Chamado não encontrado ou sem permissão de acesso.');injectIcons(content);return;}
       content.innerHTML='<div class="loading"><span class="spinner"></span>Carregando conversa...</div>';
-      await loadTicketDetails(ticket.id);content.innerHTML=ticketDetailPage(ticket);
+      await loadTicketDetails(ticket.id);content.innerHTML=ticketDetailPage(ticket);await markRead(ticket.id);setTimeout(()=>scrollMessages('auto'),30);
     }
     injectIcons(content);content.focus({preventScroll:true});
   }catch(error){content.innerHTML=errorPanel(friendly(error));injectIcons(content);}
@@ -193,8 +221,9 @@ async function renderCurrent(){
 
 function metric(icon,label,value,caption,extra=''){return `<article class="metric-card ${extra}"><div class="metric-top"><span data-icon="${icon}"></span><small>${E(label)}</small></div><strong>${E(value)}</strong><p>${E(caption)}</p></article>`;}
 function ticketRow(ticket){
-  return `<article class="ticket-row" data-ticket-id="${E(ticket.id)}" tabindex="0" role="link">
-    <div class="ticket-primary"><div class="ticket-meta"><span class="ticket-number">${ticketCode(ticket.ticket_number)}</span><span class="status ${statusClass(ticket.status)}">${E(statusLabel(ticket.status))}</span><span class="priority ${priorityClass(ticket.priority)}">${E(ticket.priority)}</span></div><div class="ticket-subject">${E(ticket.subject)}</div><div class="ticket-snippet">${E(ticket.category)}${ticket.page_url?' · Página relacionada informada':''}</div></div>
+  const unread=unreadCount(ticket.id);
+  return `<article class="ticket-row ${unread?'has-unread':''}" data-ticket-id="${E(ticket.id)}" tabindex="0" role="link">
+    <div class="ticket-primary"><div class="ticket-meta"><span class="ticket-number">${ticketCode(ticket.ticket_number)}</span>${unread?`<span class="new-message-badge">Nova mensagem${unread>1?` · ${unread}`:''}</span>`:''}<span class="status ${statusClass(ticket.status)}">${E(statusLabel(ticket.status))}</span><span class="priority ${priorityClass(ticket.priority)}">${E(ticket.priority)}</span></div><div class="ticket-subject">${E(ticket.subject)}</div><div class="ticket-snippet">${E(ticket.category)}${ticket.page_url?' · Página relacionada informada':''}</div></div>
     <div class="ticket-right"><time>${E(dateTime(ticket.last_activity_at))}</time><span data-icon="chevron-right"></span></div>
   </article>`;
 }
@@ -221,17 +250,24 @@ function newTicketPage(){
   <form id="new-ticket-form" class="panel form-card" novalidate><div class="form-section"><div class="form-grid"><div class="field span-2"><label for="subject">ASSUNTO</label><input id="subject" name="subject" maxlength="180" minlength="3" required placeholder="Ex.: Botão de agendamento não abre no celular"></div><div class="field"><label for="category">CATEGORIA</label><select id="category" name="category">${CATEGORIES.map(c=>`<option>${E(c)}</option>`).join('')}</select></div><div class="field"><label for="priority">PRIORIDADE</label><select id="priority" name="priority"><option>Baixa</option><option selected>Normal</option><option>Alta</option></select></div><div class="field span-2"><label for="page_url">PÁGINA RELACIONADA <span style="font-weight:400;color:#58738d">(opcional)</span></label><input id="page_url" name="page_url" type="url" maxlength="1000" placeholder="https://seusite.com.br/pagina"><span class="hint">Se o problema estiver em uma página específica, cole o endereço aqui.</span></div><div class="field span-2"><label for="description">DESCRIÇÃO</label><textarea id="description" name="description" minlength="3" maxlength="5000" required placeholder="Conte o que aconteceu, o que você esperava que acontecesse e, se possível, em qual dispositivo ocorreu..."></textarea></div><div class="field span-2"><label for="initial-files">ANEXOS <span style="font-weight:400;color:#58738d">(opcional)</span></label><label class="file-label" for="initial-files"><span data-icon="paperclip"></span>Selecionar imagens ou arquivos<input id="initial-files" type="file" multiple accept="image/png,image/jpeg,image/webp,application/pdf,text/plain"></label><span id="initial-files-label" class="hint">PNG, JPG, WEBP, PDF ou TXT · até 10 MB por arquivo.</span></div><div class="field span-2"><label>COMO ESCOLHER A PRIORIDADE</label><div class="priority-help"><div class="priority-option"><strong>Baixa</strong><small>Ajuste ou dúvida sem impacto imediato.</small></div><div class="priority-option"><strong>Normal</strong><small>Problema que precisa ser analisado.</small></div><div class="priority-option"><strong>Alta</strong><small>Falha importante que afeta o uso do serviço.</small></div></div></div></div><p class="form-error" id="new-ticket-error" role="alert" style="margin-top:16px"></p></div><div class="form-footer"><a class="btn btn-ghost" href="#tickets">Cancelar</a><button class="btn btn-primary" id="create-ticket-button" type="submit"><span data-icon="send"></span>Enviar chamado</button></div></form>`;
 }
 function accountPage(){
-  const p=state.profile||{};return `<section class="page-heading"><div><p class="eyebrow">SEU ACESSO</p><h2>Minha conta</h2><p>Confira os dados vinculados ao Portal DSB e gerencie sua senha.</p></div></section><section class="account-grid"><article class="panel profile-card"><div class="profile-head"><span class="avatar">${E(initials(p.name))}</span><div><h3>${E(p.name||'Cliente')}</h3><p>${E(p.company_name||'Cliente DSB')}</p></div></div><div class="profile-data"><div><small>E-mail de acesso</small><strong>${E(p.email||state.user?.email||'—')}</strong></div><div><small>Empresa</small><strong>${E(p.company_name||'—')}</strong></div><div><small>Status do cliente</small><strong>${E(p.company_status||'—')}</strong></div><div><small>Ambiente</small><strong>Portal DSB Client</strong></div></div></article><article class="panel security-card"><h3>Segurança</h3><p>Altere sua senha de acesso. A nova senha deve ter pelo menos 8 caracteres.</p><form id="change-password-form" novalidate><div class="field"><label for="account-password">NOVA SENHA</label><input id="account-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="account-confirm">CONFIRMAR SENHA</label><input id="account-confirm" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div><p class="form-error" id="account-password-error"></p><button class="btn btn-primary" type="submit">Atualizar senha</button><button class="btn btn-danger" type="button" data-action="logout" style="margin-left:6px"><span data-icon="logout"></span>Sair</button></form></article></section>`;
+  const p=state.profile||{},avatar=p.avatar_path?state.avatarUrls.get(p.avatar_path):'';
+  return `<section class="page-heading"><div><p class="eyebrow">SEU ACESSO</p><h2>Minha conta</h2><p>Confira seus dados, foto, notificações e segurança.</p></div></section><section class="account-grid"><article class="panel profile-card"><div class="profile-head"><span class="avatar account-avatar${avatar?' has-photo':''}">${avatar?`<img src="${E(avatar)}" alt="">`:E(initials(p.name))}</span><div><h3>${E(p.name||'Cliente')}</h3><p>${E(p.company_name||'Cliente DSB')}</p><div class="profile-photo-actions"><button class="btn btn-secondary" type="button" data-avatar-action="open">${avatar?'Alterar foto':'Adicionar foto'}</button>${p.avatar_path?'<button class="btn btn-ghost" type="button" data-avatar-action="remove">Remover</button>':''}</div></div></div><div class="profile-data"><div><small>E-mail de acesso</small><strong>${E(p.email||state.user?.email||'—')}</strong></div><div><small>Empresa</small><strong>${E(p.company_name||'—')}</strong></div><div><small>Status do cliente</small><strong>${E(p.company_status||'—')}</strong></div><div><small>Ambiente</small><strong>Portal DSB Client</strong></div></div><div class="notification-card"><div><small>NOTIFICAÇÕES DO WINDOWS</small><strong>${E(notificationStatus())}</strong><p>Receba um aviso quando a DSB responder e este chamado não estiver aberto. Funciona enquanto o navegador/PWA estiver em execução.</p></div><button class="btn btn-secondary" type="button" data-notification-action="toggle">${notificationsEnabled()?'Desativar':'Ativar notificações'}</button><label class="notification-sound"><input type="checkbox" data-notification-sound ${soundEnabled()?'checked':''}> Tocar som discreto com o chat fechado</label></div></article><article class="panel security-card"><h3>Segurança</h3><p>Altere sua senha de acesso. A nova senha deve ter pelo menos 8 caracteres.</p><form id="change-password-form" novalidate><div class="field"><label for="account-password">NOVA SENHA</label><input id="account-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="account-confirm">CONFIRMAR SENHA</label><input id="account-confirm" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div><p class="form-error" id="account-password-error"></p><button class="btn btn-primary" type="submit">Atualizar senha</button><button class="btn btn-danger" type="button" data-action="logout" style="margin-left:6px"><span data-icon="logout"></span>Sair</button></form></article></section>`;
+}
+function messageHtml(m,byMessage){
+  const clientMessage=m.author_kind==='client',files=byMessage.get(m.id)||[];
+  return `<div class="message ${clientMessage?'client':'staff'}" data-message-id="${E(m.id)}">${avatarHtml(m.author_user_id,m.author_name,'message-avatar')}<div class="message-bubble"><p class="message-meta">${E(clientMessage?'Você':m.author_name)} · ${E(dateTime(m.created_at))}</p><div class="message-body">${E(m.body)}</div>${files.length?`<div class="attachments">${files.map(f=>`<button class="attachment" type="button" data-attachment="${E(f.storage_path)}"><span data-icon="file"></span>${E(f.file_name)}</button>`).join('')}</div>`:''}</div></div>`;
 }
 function ticketDetailPage(ticket){
-  const messages=state.messages||[],byMessage=new Map();state.attachments.forEach(a=>{if(!byMessage.has(a.message_id))byMessage.set(a.message_id,[]);byMessage.get(a.message_id).push(a);});
-  const messagesHtml=messages.length?messages.map(m=>{
-    const client=m.author_kind==='client', files=byMessage.get(m.id)||[];
-    return `<div class="message ${client?'client':'staff'}"><span class="message-avatar">${E(initials(m.author_name))}</span><div class="message-bubble"><p class="message-meta">${E(client?'Você':m.author_name)} · ${E(dateTime(m.created_at))}</p><div class="message-body">${E(m.body)}</div>${files.length?`<div class="attachments">${files.map(f=>`<button class="attachment" type="button" data-attachment="${E(f.storage_path)}"><span data-icon="file"></span>${E(f.file_name)}</button>`).join('')}</div>`:''}</div></div>`;
-  }).join(''):emptyState('chat','Sem mensagens','Ainda não há mensagens neste chamado.');
+  const byMessage=new Map();state.attachments.forEach(a=>{if(!byMessage.has(a.message_id))byMessage.set(a.message_id,[]);byMessage.get(a.message_id).push(a);});
+  const messagesHtml=state.messages.length?state.messages.map(m=>messageHtml(m,byMessage)).join(''):emptyState('chat','Sem mensagens','Ainda não há mensagens neste chamado.');
   const link=safeUrl(ticket.page_url);
-  return `<button class="back-link" type="button" data-action="back-tickets"><span data-icon="arrow-left"></span>Voltar para meus chamados</button><section class="panel ticket-header"><div class="ticket-header-top"><span class="ticket-number">${ticketCode(ticket.ticket_number)}</span><span class="status ${statusClass(ticket.status)}">${E(statusLabel(ticket.status))}</span><span class="priority ${priorityClass(ticket.priority)}">${E(ticket.priority)}</span></div><h2>${E(ticket.subject)}</h2><p>Aberto em ${E(dateTime(ticket.created_at))} · Última atividade ${E(dateTime(ticket.last_activity_at))}</p></section><div style="height:16px"></div><section class="detail-grid"><article class="panel conversation"><div class="panel-head"><div><h3>Conversa</h3><p>Mensagens entre sua empresa e a DSB</p></div></div><div class="message-list" id="message-list">${messagesHtml}</div><form class="reply-box" id="reply-form"><textarea name="body" id="reply-body" maxlength="5000" required placeholder="Escreva sua resposta para a equipe DSB..."></textarea><p class="form-error" id="reply-error"></p><div class="reply-actions"><div><label class="file-label" for="reply-files"><span data-icon="paperclip"></span>Anexar arquivos<input id="reply-files" type="file" multiple accept="image/png,image/jpeg,image/webp,application/pdf,text/plain"></label><span class="selected-files" id="reply-files-label"></span></div><button class="btn btn-primary" id="reply-button" type="submit"><span data-icon="send"></span>Enviar resposta</button></div></form></article><aside class="ticket-side grid"><article class="panel info-card"><h3>Detalhes do chamado</h3><dl class="info-list"><div><dt>Status</dt><dd>${E(statusLabel(ticket.status))}</dd></div><div><dt>Categoria</dt><dd>${E(ticket.category)}</dd></div><div><dt>Prioridade</dt><dd>${E(ticket.priority)}</dd></div><div><dt>Responsável</dt><dd>${ticket.assigned_to?'Equipe DSB':'Triagem DSB'}</dd></div>${link?`<div><dt>Página relacionada</dt><dd><a href="${E(link)}" target="_blank" rel="noopener noreferrer">Abrir página ↗</a></dd></div>`:''}</dl></article><article class="panel service-card"><span class="service-mark" data-icon="chat"></span><h3>Responder reabre o chamado</h3><p>Se um chamado estiver resolvido ou aguardando sua resposta, uma nova mensagem sua coloca a solicitação novamente em atendimento.</p></article></aside></section>`;
+  return `<button class="back-link" type="button" data-action="back-tickets"><span data-icon="arrow-left"></span>Voltar para meus chamados</button><section class="panel ticket-header"><div class="ticket-header-top"><span class="ticket-number">${ticketCode(ticket.ticket_number)}</span><span id="detail-status" class="status ${statusClass(ticket.status)}">${E(statusLabel(ticket.status))}</span><span id="detail-priority" class="priority ${priorityClass(ticket.priority)}">${E(ticket.priority)}</span></div><h2>${E(ticket.subject)}</h2><p>Aberto em ${E(dateTime(ticket.created_at))} · Última atividade <span id="detail-last-activity">${E(dateTime(ticket.last_activity_at))}</span></p></section><div style="height:16px"></div><section class="detail-grid"><article class="panel conversation"><div class="panel-head"><div><h3>Conversa</h3><p>Mensagens em tempo real entre sua empresa e a DSB</p></div><span class="conversation-live">● Ao vivo</span></div><div class="message-list" id="message-list">${messagesHtml}</div><form class="reply-box" id="reply-form"><textarea name="body" id="reply-body" maxlength="5000" required placeholder="Escreva sua resposta para a equipe DSB..."></textarea><p class="form-error" id="reply-error"></p><div class="reply-actions"><div><label class="file-label" for="reply-files"><span data-icon="paperclip"></span>Anexar arquivos<input id="reply-files" type="file" multiple accept="image/png,image/jpeg,image/webp,application/pdf,text/plain"></label><span class="selected-files" id="reply-files-label"></span></div><button class="btn btn-primary" id="reply-button" type="submit"><span data-icon="send"></span>Enviar resposta</button></div></form></article><aside class="ticket-side grid"><article class="panel info-card"><h3>Detalhes do chamado</h3><dl class="info-list"><div><dt>Status</dt><dd id="detail-status-text">${E(statusLabel(ticket.status))}</dd></div><div><dt>Categoria</dt><dd>${E(ticket.category)}</dd></div><div><dt>Prioridade</dt><dd id="detail-priority-text">${E(ticket.priority)}</dd></div><div><dt>Responsável</dt><dd>${ticket.assigned_to?'Equipe DSB':'Triagem DSB'}</dd></div>${link?`<div><dt>Página relacionada</dt><dd><a href="${E(link)}" target="_blank" rel="noopener noreferrer">Abrir página ↗</a></dd></div>`:''}</dl></article><article class="panel service-card"><span class="service-mark" data-icon="chat"></span><h3>Responder reabre o chamado</h3><p>Se um chamado estiver resolvido ou aguardando sua resposta, uma nova mensagem sua coloca a solicitação novamente em atendimento.</p></article></aside></section>`;
 }
+function renderMessageList(behavior='smooth'){const list=$('#message-list');if(!list)return;const byMessage=new Map();state.attachments.forEach(a=>{if(!byMessage.has(a.message_id))byMessage.set(a.message_id,[]);byMessage.get(a.message_id).push(a);});list.innerHTML=state.messages.length?state.messages.map(m=>messageHtml(m,byMessage)).join(''):emptyState('chat','Sem mensagens','Ainda não há mensagens neste chamado.');injectIcons(list);scrollMessages(behavior);}
+function scrollMessages(behavior='auto'){const list=$('#message-list');if(list)requestAnimationFrame(()=>list.scrollTo({top:list.scrollHeight,behavior}));}
+function updateUnreadIndicators(){updateBadge();const route=currentRoute();if(['dashboard','tickets'].includes(route.name))renderCurrent();}
+function syncOpenTicket(ticket){if(currentRoute().name!=='ticket'||currentRoute().id!==ticket.id)return;const status=$('#detail-status'),statusText=$('#detail-status-text'),priority=$('#detail-priority'),priorityText=$('#detail-priority-text'),activity=$('#detail-last-activity');if(status){status.className=`status ${statusClass(ticket.status)}`;status.textContent=statusLabel(ticket.status);}if(statusText)statusText.textContent=statusLabel(ticket.status);if(priority){priority.className=`priority ${priorityClass(ticket.priority)}`;priority.textContent=ticket.priority;}if(priorityText)priorityText.textContent=ticket.priority;if(activity)activity.textContent=dateTime(ticket.last_activity_at);}
+
 function errorPanel(message){return `<div class="error-panel"><strong>Não foi possível carregar esta área.</strong><br>${E(message)}<div style="margin-top:14px"><button class="btn btn-secondary" type="button" data-action="refresh">Tentar novamente</button></div></div>`;}
 
 async function uploadAttachments(ticketId,messageId,files){
@@ -264,6 +300,32 @@ async function sendReply(form){
 async function openAttachment(path){
   const {data,error}=await state.client.storage.from('dsb-ticket-attachments').createSignedUrl(path,90);if(error)throw error;if(!data?.signedUrl)throw Error('Não foi possível abrir o anexo.');window.open(data.signedUrl,'_blank','noopener,noreferrer');
 }
+
+function patchTicket(ticket){if(!ticket?.id)return;const i=state.tickets.findIndex(t=>t.id===ticket.id);if(i>=0)state.tickets[i]={...state.tickets[i],...ticket};else state.tickets.unshift(ticket);state.tickets.sort((a,b)=>new Date(b.last_activity_at||b.updated_at)-new Date(a.last_activity_at||a.updated_at));syncOpenTicket(state.tickets.find(t=>t.id===ticket.id));}
+function upsertMessage(message){if(!message?.id||state.messages.some(m=>m.id===message.id))return false;state.messages.push(message);state.messages.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));return true;}
+function upsertAttachment(a){if(!a?.id)return false;const i=state.attachments.findIndex(x=>x.id===a.id);if(i>=0)state.attachments[i]=a;else state.attachments.push(a);return true;}
+async function handleRealtimeMessage(payload){
+  const m=payload.new;if(!m?.id)return;
+  let reloaded=false;
+  if(!state.tickets.some(t=>t.id===m.ticket_id)){await loadTickets({silent:true});reloaded=true;}
+  const route=currentRoute(),open=route.name==='ticket'&&route.id===m.ticket_id&&!document.hidden;
+  if(open){
+    if(upsertMessage(m)){await loadTicketProfiles(m.ticket_id);renderMessageList('smooth');}
+    if(m.author_kind==='staff')await markRead(m.ticket_id);
+  }else if(m.author_kind==='staff'){
+    // Se a lista precisou ser recarregada, loadUnread() já trouxe a contagem correta.
+    if(!reloaded)state.unread.set(m.ticket_id,unreadCount(m.ticket_id)+1);
+    updateUnreadIndicators();playMessageSound();
+    const t=state.tickets.find(x=>x.id===m.ticket_id);if(t)await showWindowsNotification(t,m);
+  }
+}
+function handleRealtimeAttachment(payload){const a=payload.new;if(!a?.id)return;const route=currentRoute();if(route.name==='ticket'&&route.id===a.ticket_id&&!document.hidden&&upsertAttachment(a))renderMessageList('auto');}
+function handleRealtimeTicket(payload){if(payload.eventType==='DELETE'){const id=payload.old?.id;state.tickets=state.tickets.filter(t=>t.id!==id);state.unread.delete(id);if(currentRoute().name==='ticket'&&currentRoute().id===id)location.hash='tickets';}
+  else patchTicket(payload.new);
+  const route=currentRoute();if(['dashboard','tickets'].includes(route.name))renderCurrent();updateBadge();
+}
+function startRealtime(){if(!state.client||state.realtime)return;state.realtime=state.client.channel(`dsb-client-realtime-${state.user?.id||'session'}`).on('postgres_changes',{event:'*',schema:'public',table:'dsb_tickets'},handleRealtimeTicket).on('postgres_changes',{event:'INSERT',schema:'public',table:'dsb_ticket_messages'},payload=>{handleRealtimeMessage(payload).catch(()=>{});}).on('postgres_changes',{event:'INSERT',schema:'public',table:'dsb_ticket_attachments'},handleRealtimeAttachment).subscribe();}
+function stopRealtime(){if(state.realtime&&state.client)state.client.removeChannel(state.realtime);state.realtime=null;}
 
 async function login(event){
   event.preventDefault();const button=$('#login-submit'),errorEl=$('#login-error');errorEl.textContent='';setBusy(button,true,'Entrando...');
@@ -329,6 +391,9 @@ function bindEvents(){
   $('#mobile-menu').addEventListener('click',openMenu);$('#sidebar-overlay').addEventListener('click',closeMenu);window.addEventListener('hashchange',()=>{if(state.user&&state.profile)handleRoute();});
   $('#refresh-button').addEventListener('click',refresh);
   document.addEventListener('click',async event=>{
+    const avatarAction=event.target.closest('[data-avatar-action]')?.dataset.avatarAction;
+    if(avatarAction){try{if(avatarAction==='open')showAvatarModal();if(avatarAction==='close')closeAvatarModal();if(avatarAction==='save')await saveAvatar();if(avatarAction==='remove')await removeAvatar();}catch(error){const el=$('#avatar-error');if(el)el.textContent=friendly(error);else toast(friendly(error),'error');}return;}
+    if(event.target.closest('[data-notification-action]')){await toggleNotifications();return;}
     const action=event.target.closest('[data-action]')?.dataset.action;if(action==='logout'){await logout();return;}if(action==='account'){location.hash='account';return;}if(action==='back-tickets'){location.hash='tickets';return;}if(action==='refresh'){await refresh();return;}
     const row=event.target.closest('[data-ticket-id]');if(row){location.hash=`ticket/${row.dataset.ticketId}`;return;}
     const attachment=event.target.closest('[data-attachment]');if(attachment){try{await openAttachment(attachment.dataset.attachment);}catch(error){toast(friendly(error),'error');}}
@@ -336,9 +401,9 @@ function bindEvents(){
   document.addEventListener('keydown',event=>{const row=event.target.closest?.('[data-ticket-id]');if(row&&(event.key==='Enter'||event.key===' ')){event.preventDefault();location.hash=`ticket/${row.dataset.ticketId}`;}});
   document.addEventListener('input',event=>{
     if(event.target.id==='ticket-search'){state.search=event.target.value;const panel=$('.ticket-table-panel');if(panel){const rows=filteredTickets();panel.innerHTML=rows.length?`<div class="ticket-list">${rows.map(ticketRow).join('')}</div>`:emptyState('search','Nenhum chamado encontrado','Tente alterar os filtros ou abra uma nova solicitação.','');injectIcons(panel);}}
-    if(event.target.id==='initial-files')updateFileLabel('initial-files','initial-files-label');if(event.target.id==='reply-files')updateFileLabel('reply-files','reply-files-label');
+    if(event.target.id==='avatar-zoom'&&state.crop?.img){state.crop.zoom=Number(event.target.value)||1;clampCrop();drawCrop();}
   });
-  document.addEventListener('change',event=>{if(event.target.id==='ticket-filter'){state.filter=event.target.value;renderCurrent();}});
+  document.addEventListener('change',async event=>{if(event.target.id==='ticket-filter'){state.filter=event.target.value;renderCurrent();}if(event.target.id==='initial-files')updateFileLabel('initial-files','initial-files-label');if(event.target.id==='reply-files')updateFileLabel('reply-files','reply-files-label');if(event.target.matches('[data-notification-sound]'))localStorage.setItem(SOUND_KEY,event.target.checked?'true':'false');if(event.target.id==='avatar-file-input'){try{await loadCropFile(event.target.files?.[0]);}catch(error){const el=$('#avatar-error');if(el)el.textContent=friendly(error);}}});
   document.addEventListener('submit',async event=>{
     if(event.target.id==='new-ticket-form'){
       event.preventDefault();const button=$('#create-ticket-button'),errorEl=$('#new-ticket-error');errorEl.textContent='';setBusy(button,true,'Enviando...');try{const id=await createTicket(event.target);toast('Chamado criado com sucesso.');location.hash=`ticket/${id}`;}catch(error){errorEl.textContent=friendly(error);}finally{setBusy(button,false);}return;
@@ -352,6 +417,7 @@ function bindEvents(){
       return;
     }
   });
+  document.addEventListener('visibilitychange',()=>{const route=currentRoute();if(!document.hidden&&route.name==='ticket')markRead(route.id);});
 }
 function updateFileLabel(inputId,labelId){const files=[...($(`#${inputId}`)?.files||[])];const label=$(`#${labelId}`);if(!label)return;label.textContent=files.length?`${files.length} arquivo(s): ${files.map(f=>f.name).join(', ')}`:(inputId==='initial-files'?'PNG, JPG, WEBP, PDF ou TXT · até 10 MB por arquivo.':'');}
 
