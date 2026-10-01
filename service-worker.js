@@ -1,5 +1,5 @@
-const CACHE_NAME='dsb-client-v2';
-const STATIC=['./','./index.html','./css/styles.css','./js/app.js','./assets/images/logo.png'];
+const CACHE_NAME='dsb-client-v3';
+const STATIC=['./','./index.html','./css/styles.css','./js/app.js','./assets/images/logo.png','./assets/notification/universfield.mp3','./assets/notification/notification-038.mp3','./assets/notification/notification-024.mp3'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE_NAME).then(c=>c.addAll(STATIC)));self.skipWaiting();});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE_NAME).map(k=>caches.delete(k)))));self.clients.claim();});
 self.addEventListener('fetch',event=>{const r=event.request,u=new URL(r.url);if(r.method!=='GET'||u.hostname.includes('supabase.co'))return;event.respondWith(fetch(r).then(res=>{const copy=res.clone();caches.open(CACHE_NAME).then(c=>c.put(r,copy));return res;}).catch(()=>caches.match(r)));});

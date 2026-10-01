@@ -12,6 +12,9 @@ const ALLOWED_MIME = new Set(['image/png','image/jpeg','image/webp','application
 const AVATAR_BUCKET='dsb-avatars';
 const NOTIFY_KEY='dsb.client.tickets.windowsNotifications';
 const SOUND_KEY='dsb.client.tickets.sound';
+const SOUND_PREF_KEY='dsb.client.tickets.soundPreference';
+const SOUND_OPTIONS={none:{label:'Sem som',src:''},suave:{label:'DSB Suave',src:'assets/notification/universfield.mp3'},pop:{label:'DSB Pop',src:'assets/notification/notification-038.mp3'},alerta:{label:'DSB Alerta',src:'assets/notification/notification-024.mp3'}};
+let audioUnlocked=false;const soundPlayers=new Map();
 
 const ICONS = {
   home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3.5 10.7 12 3.8l8.5 6.9v9.1a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z"/><path d="M9 21.5v-7h6v7"/></svg>',
@@ -46,7 +49,7 @@ const ICONS = {
 const state = {
   client:null, user:null, profile:null, tickets:[], messages:[], attachments:[],
   loading:false, loaded:false, recovery:false, authEntryType:null, filter:'Todos', search:'', selectedId:null,
-  poll:null,realtime:null,unread:new Map(),ticketProfiles:new Map(),avatarUrls:new Map(),crop:null
+  poll:null,realtime:null,unread:new Map(),ticketProfiles:new Map(),avatarUrls:new Map(),crop:null,notificationSound:null
 };
 
 function injectIcons(base=document){
@@ -94,14 +97,20 @@ function validateFiles(files){for(const file of files){if(file.size>MAX_FILE_SIZ
 function totalUnread(){return [...state.unread.values()].reduce((sum,n)=>sum+Number(n||0),0);}
 function unreadCount(ticketId){return Number(state.unread.get(ticketId)||0);}
 function notificationsEnabled(){return localStorage.getItem(NOTIFY_KEY)==='true'&&'Notification'in window&&Notification.permission==='granted';}
-function soundEnabled(){return localStorage.getItem(SOUND_KEY)!=='false';}
+function soundPreference(){const db=String(state.notificationSound||'').toLowerCase();if(SOUND_OPTIONS[db])return db;const saved=String(localStorage.getItem(SOUND_PREF_KEY)||'').toLowerCase();if(SOUND_OPTIONS[saved])return saved;if(localStorage.getItem(SOUND_KEY)==='false')return'none';return'suave';}
+function soundEnabled(){return soundPreference()!=='none';}
+function soundOptionsMarkup(selected=soundPreference()){return Object.entries(SOUND_OPTIONS).map(([value,item])=>`<option value="${E(value)}"${value===selected?' selected':''}>${E(item.label)}</option>`).join('');}
+function getSoundPlayer(pref=soundPreference()){const item=SOUND_OPTIONS[pref];if(!item?.src)return null;let audio=soundPlayers.get(pref);if(!audio){audio=new Audio(item.src);audio.preload='auto';audio.volume=.34;soundPlayers.set(pref,audio);}return audio;}
+async function loadSoundPreference(){try{const {data,error}=await state.client.rpc('dsb_get_my_notification_sound');if(error)throw error;const value=Array.isArray(data)?data[0]:data;if(SOUND_OPTIONS[String(value||'').toLowerCase()])state.notificationSound=String(value).toLowerCase();}catch{}return soundPreference();}
+async function saveSoundPreference(value){value=String(value||'').toLowerCase();if(!SOUND_OPTIONS[value])value='suave';localStorage.setItem(SOUND_PREF_KEY,value);localStorage.setItem(SOUND_KEY,value==='none'?'false':'true');state.notificationSound=value;const {error}=await state.client.rpc('dsb_set_my_notification_sound',{p_sound:value});if(error&&!/does not exist|schema cache|PGRST202/i.test(String(error.message||error)))throw error;return value;}
 async function signAvatar(path){if(!path)return'';if(state.avatarUrls.has(path))return state.avatarUrls.get(path);const {data,error}=await state.client.storage.from(AVATAR_BUCKET).createSignedUrl(path,43200);if(error||!data?.signedUrl)return'';state.avatarUrls.set(path,data.signedUrl);return data.signedUrl;}
 function avatarHtml(userId,name,className='avatar'){const profile=state.ticketProfiles.get(userId);const path=profile?.avatar_path||(userId===state.user?.id?state.profile?.avatar_path:'');const url=path?state.avatarUrls.get(path):'';return `<span class="${E(className)}${url?' has-photo':''}">${url?`<img src="${E(url)}" alt="">`:E(initials(name))}</span>`;}
 async function refreshOwnAvatar(){const path=state.profile?.avatar_path;if(path)await signAvatar(path);hydrateProfileUI();}
 async function loadTicketProfiles(ticketId){state.ticketProfiles.clear();const {data,error}=await state.client.rpc('dsb_ticket_profiles',{p_ticket_id:ticketId});if(error)return;await Promise.all((data||[]).map(async p=>{if(p.avatar_path)await signAvatar(p.avatar_path);state.ticketProfiles.set(p.user_id,p);}));}
 async function loadUnread(){try{const {data,error}=await state.client.rpc('dsb_ticket_unread_summary');if(error)throw error;state.unread=new Map((data||[]).map(r=>[r.ticket_id,Number(r.unread_count)||0]));}catch(error){if(!/dsb_ticket_unread_summary|PGRST202|does not exist|schema cache/i.test(String(error?.message||error)))throw error;state.unread=new Map();}}
 async function markRead(ticketId){if(!ticketId)return;try{const {error}=await state.client.rpc('dsb_mark_ticket_read',{p_ticket_id:ticketId});if(error)throw error;state.unread.set(ticketId,0);updateBadge();updateUnreadIndicators();}catch{}}
-function playMessageSound(){if(!soundEnabled())return;try{const AudioCtx=window.AudioContext||window.webkitAudioContext;const ac=new AudioCtx(),o=ac.createOscillator(),g=ac.createGain();o.type='sine';o.frequency.value=600;g.gain.setValueAtTime(.0001,ac.currentTime);g.gain.exponentialRampToValueAtTime(.04,ac.currentTime+.015);g.gain.exponentialRampToValueAtTime(.0001,ac.currentTime+.18);o.connect(g);g.connect(ac.destination);o.start();o.stop(ac.currentTime+.2);o.onended=()=>ac.close();}catch{}}
+async function unlockMessageSound(){if(audioUnlocked||!soundEnabled())return audioUnlocked;const audio=getSoundPlayer();if(!audio)return false;try{const oldVolume=audio.volume;audio.volume=0;audio.currentTime=0;await audio.play();audio.pause();audio.currentTime=0;audio.volume=oldVolume;audioUnlocked=true;return true;}catch{return false;}}
+async function playMessageSound(pref=soundPreference()){if(pref==='none')return;const audio=getSoundPlayer(pref);if(!audio)return;try{audio.currentTime=0;await audio.play();audioUnlocked=true;}catch{}}
 async function showWindowsNotification(ticket,message){if(!notificationsEnabled())return;const options={body:`${message.author_name}: ${String(message.body||'Nova mensagem').slice(0,120)}`,icon:'assets/images/logo.png',tag:`dsb-client-ticket-${ticket.id}`,renotify:true,data:{url:`${location.origin}${location.pathname}#ticket/${ticket.id}`}};try{if('serviceWorker'in navigator){const reg=await navigator.serviceWorker.ready;await reg.showNotification(`${ticketCode(ticket.ticket_number)} · DSB`,options);}else new Notification(`${ticketCode(ticket.ticket_number)} · DSB`,options);}catch{}}
 async function toggleNotifications(){if(!('Notification'in window)){toast('Este navegador não oferece notificações do sistema.','error');return;}if(notificationsEnabled()){localStorage.setItem(NOTIFY_KEY,'false');await renderCurrent();return;}if(Notification.permission==='denied'){toast('As notificações estão bloqueadas. Libere a permissão nas configurações do navegador.','error');return;}const permission=await Notification.requestPermission();localStorage.setItem(NOTIFY_KEY,permission==='granted'?'true':'false');toast(permission==='granted'?'Notificações ativadas neste dispositivo.':'Permissão de notificações não concedida.',permission==='granted'?'success':'error');await renderCurrent();}
 function notificationStatus(){if(!('Notification'in window))return'Não suportado';if(Notification.permission==='denied')return'Bloqueado no navegador';if(notificationsEnabled())return'Ativadas neste dispositivo';if(Notification.permission==='granted')return'Desativadas neste dispositivo';return'Aguardando permissão';}
@@ -135,7 +144,7 @@ function bindAuthListener(client){
       state.recovery=true; state.user=session?.user||null; showRecovery(); return;
     }
     if(event==='SIGNED_OUT'){
-      stopPolling();stopRealtime(); state.user=null;state.profile=null;state.tickets=[];state.unread.clear(); showLogin();
+      stopPolling();stopRealtime(); state.user=null;state.profile=null;state.tickets=[];state.unread.clear();state.notificationSound=null; showLogin();
     }
   });
 }
@@ -162,7 +171,7 @@ function hydrateProfileUI(){
 
 async function loadProfile(){
   const {data,error}=await state.client.rpc('dsb_customer_portal_profile');
-  if(error)throw error; state.profile=Array.isArray(data)?data[0]:data;if(state.profile?.avatar_path)await signAvatar(state.profile.avatar_path);
+  if(error)throw error; state.profile=Array.isArray(data)?data[0]:data;if(state.profile?.avatar_path)await signAvatar(state.profile.avatar_path);await loadSoundPreference();
   return state.profile;
 }
 async function loadTickets({silent=false}={}){
@@ -251,7 +260,7 @@ function newTicketPage(){
 }
 function accountPage(){
   const p=state.profile||{},avatar=p.avatar_path?state.avatarUrls.get(p.avatar_path):'';
-  return `<section class="page-heading"><div><p class="eyebrow">SEU ACESSO</p><h2>Minha conta</h2><p>Confira seus dados, foto, notificações e segurança.</p></div></section><section class="account-grid"><article class="panel profile-card"><div class="profile-head"><span class="avatar account-avatar${avatar?' has-photo':''}">${avatar?`<img src="${E(avatar)}" alt="">`:E(initials(p.name))}</span><div><h3>${E(p.name||'Cliente')}</h3><p>${E(p.company_name||'Cliente DSB')}</p><div class="profile-photo-actions"><button class="btn btn-secondary" type="button" data-avatar-action="open">${avatar?'Alterar foto':'Adicionar foto'}</button>${p.avatar_path?'<button class="btn btn-ghost" type="button" data-avatar-action="remove">Remover</button>':''}</div></div></div><div class="profile-data"><div><small>E-mail de acesso</small><strong>${E(p.email||state.user?.email||'—')}</strong></div><div><small>Empresa</small><strong>${E(p.company_name||'—')}</strong></div><div><small>Status do cliente</small><strong>${E(p.company_status||'—')}</strong></div><div><small>Ambiente</small><strong>Portal DSB Client</strong></div></div><div class="notification-card"><div><small>NOTIFICAÇÕES DO WINDOWS</small><strong>${E(notificationStatus())}</strong><p>Receba um aviso quando a DSB responder e este chamado não estiver aberto. Funciona enquanto o navegador/PWA estiver em execução.</p></div><button class="btn btn-secondary" type="button" data-notification-action="toggle">${notificationsEnabled()?'Desativar':'Ativar notificações'}</button><label class="notification-sound"><input type="checkbox" data-notification-sound ${soundEnabled()?'checked':''}> Tocar som discreto com o chat fechado</label></div></article><article class="panel security-card"><h3>Segurança</h3><p>Altere sua senha de acesso. A nova senha deve ter pelo menos 8 caracteres.</p><form id="change-password-form" novalidate><div class="field"><label for="account-password">NOVA SENHA</label><input id="account-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="account-confirm">CONFIRMAR SENHA</label><input id="account-confirm" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div><p class="form-error" id="account-password-error"></p><button class="btn btn-primary" type="submit">Atualizar senha</button><button class="btn btn-danger" type="button" data-action="logout" style="margin-left:6px"><span data-icon="logout"></span>Sair</button></form></article></section>`;
+  return `<section class="page-heading"><div><p class="eyebrow">SEU ACESSO</p><h2>Minha conta</h2><p>Confira seus dados, foto, notificações e segurança.</p></div></section><section class="account-grid"><article class="panel profile-card"><div class="profile-head"><span class="avatar account-avatar${avatar?' has-photo':''}">${avatar?`<img src="${E(avatar)}" alt="">`:E(initials(p.name))}</span><div><h3>${E(p.name||'Cliente')}</h3><p>${E(p.company_name||'Cliente DSB')}</p><div class="profile-photo-actions"><button class="btn btn-secondary" type="button" data-avatar-action="open">${avatar?'Alterar foto':'Adicionar foto'}</button>${p.avatar_path?'<button class="btn btn-ghost" type="button" data-avatar-action="remove">Remover</button>':''}</div></div></div><div class="profile-data"><div><small>E-mail de acesso</small><strong>${E(p.email||state.user?.email||'—')}</strong></div><div><small>Empresa</small><strong>${E(p.company_name||'—')}</strong></div><div><small>Status do cliente</small><strong>${E(p.company_status||'—')}</strong></div><div><small>Ambiente</small><strong>Portal DSB Client</strong></div></div><div class="notification-card"><div><small>NOTIFICAÇÕES DO WINDOWS</small><strong>${E(notificationStatus())}</strong><p>Receba um aviso quando a DSB responder e este chamado não estiver aberto. Funciona enquanto o navegador/PWA estiver em execução.</p></div><button class="btn btn-secondary" type="button" data-notification-action="toggle">${notificationsEnabled()?'Desativar':'Ativar notificações'}</button><div class="notification-sound-picker"><label for="client-notification-sound">Som de nova mensagem</label><div class="notification-sound-row"><select id="client-notification-sound" data-notification-sound-select>${soundOptionsMarkup()}</select><button class="btn btn-secondary" type="button" data-notification-action="test-sound">▶ Testar som</button></div><p>O som toca apenas quando a conversa do chamado não estiver sendo visualizada.</p></div></div></article><article class="panel security-card"><h3>Segurança</h3><p>Altere sua senha de acesso. A nova senha deve ter pelo menos 8 caracteres.</p><form id="change-password-form" novalidate><div class="field"><label for="account-password">NOVA SENHA</label><input id="account-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="account-confirm">CONFIRMAR SENHA</label><input id="account-confirm" name="confirm" type="password" minlength="8" autocomplete="new-password" required></div><p class="form-error" id="account-password-error"></p><button class="btn btn-primary" type="submit">Atualizar senha</button><button class="btn btn-danger" type="button" data-action="logout" style="margin-left:6px"><span data-icon="logout"></span>Sair</button></form></article></section>`;
 }
 function messageHtml(m,byMessage){
   const clientMessage=m.author_kind==='client',files=byMessage.get(m.id)||[];
@@ -369,7 +378,7 @@ async function changePassword(form){
 
     form.reset();
     await state.client.auth.signOut();
-    state.user=null;state.profile=null;state.tickets=[];state.recovery=false;
+    state.user=null;state.profile=null;state.tickets=[];state.recovery=false;state.notificationSound=null;
     history.replaceState(null,'',location.pathname);
     showLogin();
     if(email)$('#login-email').value=email;
@@ -386,6 +395,7 @@ async function refresh(){
 }
 
 function bindEvents(){
+  ['pointerdown','touchstart','keydown'].forEach(type=>document.addEventListener(type,()=>{unlockMessageSound();},{passive:true}));
   $('#login-form').addEventListener('submit',login);$('#forgot-password').addEventListener('click',forgotPassword);$('#recovery-form').addEventListener('submit',recoverPassword);
   $('#password-toggle').addEventListener('click',()=>{const input=$('#login-password'),button=$('#password-toggle');const show=input.type==='password';input.type=show?'text':'password';button.dataset.iconButton=show?'eye-off':'eye';injectIcons(button);});
   $('#mobile-menu').addEventListener('click',openMenu);$('#sidebar-overlay').addEventListener('click',closeMenu);window.addEventListener('hashchange',()=>{if(state.user&&state.profile)handleRoute();});
@@ -393,7 +403,7 @@ function bindEvents(){
   document.addEventListener('click',async event=>{
     const avatarAction=event.target.closest('[data-avatar-action]')?.dataset.avatarAction;
     if(avatarAction){try{if(avatarAction==='open')showAvatarModal();if(avatarAction==='close')closeAvatarModal();if(avatarAction==='save')await saveAvatar();if(avatarAction==='remove')await removeAvatar();}catch(error){const el=$('#avatar-error');if(el)el.textContent=friendly(error);else toast(friendly(error),'error');}return;}
-    if(event.target.closest('[data-notification-action]')){await toggleNotifications();return;}
+    const notificationAction=event.target.closest('[data-notification-action]')?.dataset.notificationAction;if(notificationAction){if(notificationAction==='toggle')await toggleNotifications();if(notificationAction==='test-sound'){await unlockMessageSound();await playMessageSound();}return;}
     const action=event.target.closest('[data-action]')?.dataset.action;if(action==='logout'){await logout();return;}if(action==='account'){location.hash='account';return;}if(action==='back-tickets'){location.hash='tickets';return;}if(action==='refresh'){await refresh();return;}
     const row=event.target.closest('[data-ticket-id]');if(row){location.hash=`ticket/${row.dataset.ticketId}`;return;}
     const attachment=event.target.closest('[data-attachment]');if(attachment){try{await openAttachment(attachment.dataset.attachment);}catch(error){toast(friendly(error),'error');}}
@@ -403,7 +413,7 @@ function bindEvents(){
     if(event.target.id==='ticket-search'){state.search=event.target.value;const panel=$('.ticket-table-panel');if(panel){const rows=filteredTickets();panel.innerHTML=rows.length?`<div class="ticket-list">${rows.map(ticketRow).join('')}</div>`:emptyState('search','Nenhum chamado encontrado','Tente alterar os filtros ou abra uma nova solicitação.','');injectIcons(panel);}}
     if(event.target.id==='avatar-zoom'&&state.crop?.img){state.crop.zoom=Number(event.target.value)||1;clampCrop();drawCrop();}
   });
-  document.addEventListener('change',async event=>{if(event.target.id==='ticket-filter'){state.filter=event.target.value;renderCurrent();}if(event.target.id==='initial-files')updateFileLabel('initial-files','initial-files-label');if(event.target.id==='reply-files')updateFileLabel('reply-files','reply-files-label');if(event.target.matches('[data-notification-sound]'))localStorage.setItem(SOUND_KEY,event.target.checked?'true':'false');if(event.target.id==='avatar-file-input'){try{await loadCropFile(event.target.files?.[0]);}catch(error){const el=$('#avatar-error');if(el)el.textContent=friendly(error);}}});
+  document.addEventListener('change',async event=>{if(event.target.id==='ticket-filter'){state.filter=event.target.value;renderCurrent();}if(event.target.id==='initial-files')updateFileLabel('initial-files','initial-files-label');if(event.target.id==='reply-files')updateFileLabel('reply-files','reply-files-label');if(event.target.matches('[data-notification-sound-select]')){try{const value=await saveSoundPreference(event.target.value);audioUnlocked=false;if(value!=='none'){await unlockMessageSound();await playMessageSound(value);}toast(value==='none'?'Som de mensagens desativado.':`Som selecionado: ${SOUND_OPTIONS[value].label}.`);}catch(error){toast(friendly(error),'error');}}if(event.target.id==='avatar-file-input'){try{await loadCropFile(event.target.files?.[0]);}catch(error){const el=$('#avatar-error');if(el)el.textContent=friendly(error);}}});
   document.addEventListener('submit',async event=>{
     if(event.target.id==='new-ticket-form'){
       event.preventDefault();const button=$('#create-ticket-button'),errorEl=$('#new-ticket-error');errorEl.textContent='';setBusy(button,true,'Enviando...');try{const id=await createTicket(event.target);toast('Chamado criado com sucesso.');location.hash=`ticket/${id}`;}catch(error){errorEl.textContent=friendly(error);}finally{setBusy(button,false);}return;
